@@ -1,0 +1,23 @@
+﻿{
+    "version":  "0.1.0",
+    "package":  "dev.codex.mobile",
+    "artifact":  "codex-mobile-0.1.0-arm64.apk",
+    "bytes":  165086177,
+    "sha256":  "a1b928e2d160d0e35d43aec36e624765ed9c0471a9d9c1820d7bd9ac1e6234b8",
+    "minAndroidApi":  26,
+    "targetAndroidApi":  36,
+    "architecture":  "arm64-v8a",
+    "codexSourceCommit":  "a9abdeaff1773ec6e867253ae59b19128077676f",
+    "validation":  {
+                       "androidNativeBuild":  "passed",
+                       "androidPackageBuild":  "passed",
+                       "apkSignature":  "passed",
+                       "elfArchitecture":  "AArch64",
+                       "elfPageAlignment":  "16 KiB",
+                       "frontendUnitTests":  11,
+                       "mobileInterfaceTests":  4,
+                       "originalCoreIntegrationTests":  1,
+                       "deviceValidation":  "pending - no device attached",
+                       "iosBinary":  "pending - macOS/Xcode required"
+                   }
+}

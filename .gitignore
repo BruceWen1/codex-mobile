@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.cache/
+.tools/
+.env*
+!.env.example
+android/.gradle/
+android/local.properties
+android/**/build/
+ios/App/Pods/
+ios/App/build/
+test-results/
+native/runtime/target/
+android/app/src/main/jniLibs/
+ios/App/CodexRuntime.xcframework/
+*.tsbuildinfo
+artifacts/android/*.apk

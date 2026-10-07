@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Codex-style identity mark for the native mobile application. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="@android:color/transparent"
+        android:strokeColor="#F9F9F7" android:strokeWidth="4.4"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M44.2,37.2H35.4V47.5L29.4,54L35.4,60.5V70.8H44.2M63.8,37.2H72.6V47.5L78.6,54L72.6,60.5V70.8H63.8M58.2,34.4L49.8,73.6" />
+</vector>
