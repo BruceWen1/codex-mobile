@@ -27,6 +27,7 @@ import com.getcapacitor.annotation.PermissionCallback;
 
 import androidx.activity.result.ActivityResult;
 import androidx.appcompat.app.AlertDialog;
+import androidx.core.content.ContextCompat;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -38,24 +39,32 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Process-local Codex runtime host.
  * Credentials and history remain in the application's private native directory.
  */
 @CapacitorPlugin(name = "CodexRuntime", permissions = {
-    @Permission(alias = "storage", strings = {Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE})
+    @Permission(alias = "storage", strings = {Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE}),
+    @Permission(alias = "notifications", strings = {Manifest.permission.POST_NOTIFICATIONS})
 })
 public class CodexRuntimePlugin extends Plugin {
+    // Retain service execution while an original submission or user response awaits JNI dispatch.
+    static final AtomicInteger foregroundRequests = new AtomicInteger();
     private final ExecutorService workers = Executors.newFixedThreadPool(3);
     private String libraryError;
     private boolean certificatesConfigured;
+    private final AtomicReference<String> resumeThreadId = new AtomicReference<>();
 
     /**
      * Initialize native library availability.
@@ -155,7 +164,71 @@ public class CodexRuntimePlugin extends Plugin {
         String json = call.getString("json");
         // Reject missing payloads before crossing the JNI boundary.
         if (json == null) { call.reject("An original protocol request is required"); return; }
-        workers.execute(() -> resolveJson(call, nativeRequest(json)));
+        // Request notification visibility before the first user-initiated background turn.
+        try {
+            String method = new JSONObject(json).optString("method");
+            if ("turn/start".equals(method) && Build.VERSION.SDK_INT >= 33
+                && getPermissionState("notifications") != PermissionState.GRANTED
+                && !getContext().getSharedPreferences("codex", 0).getBoolean("notificationsRequested", false)) {
+                getContext().getSharedPreferences("codex", 0).edit().putBoolean("notificationsRequested", true).apply();
+                requestPermissionForAlias("notifications", call, "notificationsGranted");
+                return;
+            }
+        } catch (Exception error) { call.reject(error.getMessage()); return; }
+        dispatchRequest(call);
+    }
+
+    /**
+     * Continue the original turn submission after Android notification permission handling.
+     *
+     * Args:
+     *     call (PluginCall): Original protocol request awaiting dispatch.
+     * Returns:
+     *     void: The native engine receives the original submission.
+     */
+    @PermissionCallback
+    private void notificationsGranted(PluginCall call) { dispatchRequest(call); }
+
+    /**
+     * Retain native service ownership before dispatching an original turn request.
+     *
+     * Args:
+     *     call (PluginCall): Request containing the original protocol envelope.
+     * Returns:
+     *     void: The original result resolves the native bridge request.
+     */
+    private void dispatchRequest(PluginCall call) {
+        String json = call.getString("json");
+        boolean resumesTask;
+        boolean retained = false;
+        try {
+            JSONObject request = new JSONObject(json);
+            resumesTask = "turn/start".equals(request.optString("method")) || (!request.has("method") && request.has("id"));
+            // Start the foreground service while the user-initiated submission is visible.
+            if (resumesTask) {
+                foregroundRequests.incrementAndGet();
+                retained = true;
+                ContextCompat.startForegroundService(getContext(), new Intent(getContext(), CodexTaskService.class));
+            }
+        } catch (Exception error) {
+            // Release a failed foreground-service submission before exposing the actual error.
+            if (retained) foregroundRequests.decrementAndGet();
+            call.reject(error.getMessage()); return;
+        }
+        // Retain queued work or release ownership if the interface was destroyed before dispatch.
+        try {
+            workers.execute(() -> {
+                try { resolveJson(call, nativeRequest(json)); }
+                finally {
+                    // Release service ownership after this original submission or response completes.
+                    if (resumesTask) foregroundRequests.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException error) {
+            // Preserve balanced service ownership across activity teardown.
+            if (resumesTask) foregroundRequests.decrementAndGet();
+            call.reject("手机界面已关闭，请重新打开应用。");
+        }
     }
 
     /**
@@ -172,7 +245,13 @@ public class CodexRuntimePlugin extends Plugin {
         if (libraryError != null) { call.reject(libraryError); return; }
         try {
             JSObject result = new JSObject();
-            result.put("events", new JSONArray(nativePoll()));
+            JSONArray events = new JSONArray(nativePoll());
+            // Rejoin an original conversation selected through its native task notification.
+            String selected = resumeThreadId.getAndSet(null);
+            if (selected != null && !selected.isEmpty()) {
+                events.put(new JSONObject().put("method", "mobile/resume").put("params", new JSONObject().put("threadId", selected)));
+            }
+            result.put("events", events);
             call.resolve(result);
         } catch (Exception error) { call.reject(error.getMessage()); }
     }
@@ -341,8 +420,32 @@ public class CodexRuntimePlugin extends Plugin {
      *     void: The bridge request receives the actual result or serialization failure.
      */
     private void resolveJson(PluginCall call, String json) {
-        try { call.resolve(new JSObject(json)); }
+        try {
+            JSObject response = new JSObject(json);
+            // Restore notification-selected tasks when Android recreates the interface activity.
+            if ("start".equals(call.getMethodName()) && response.has("result")) {
+                String selected = getActivity().getIntent().getStringExtra(CodexTaskService.THREAD_EXTRA);
+                if (selected != null && !selected.isEmpty()) {
+                    response.getJSONObject("result").put("resumeThreadId", selected);
+                    getActivity().getIntent().removeExtra(CodexTaskService.THREAD_EXTRA);
+                }
+            }
+            call.resolve(response);
+        }
         catch (Exception error) { call.reject(error.getMessage()); }
+    }
+
+    /**
+     * Receive a native task notification opened into the existing activity.
+     *
+     * Args:
+     *     intent (Intent): Original Android notification navigation intent.
+     * Returns:
+     *     void: The next bridge poll rejoins the selected original conversation.
+     */
+    @Override
+    protected void handleOnNewIntent(Intent intent) {
+        resumeThreadId.set(intent.getStringExtra(CodexTaskService.THREAD_EXTRA));
     }
 
     /**
@@ -376,7 +479,7 @@ public class CodexRuntimePlugin extends Plugin {
      * Returns:
      *     String: Original app-server result.
      */
-    private static native String nativeRequest(String json);
+    static native String nativeRequest(String json);
 
     /**
      * Drain the Rust event queue.
@@ -387,4 +490,14 @@ public class CodexRuntimePlugin extends Plugin {
      *     String: Ordered original engine event array.
      */
     private static native String nativePoll();
+
+    /**
+     * Read native task status without consuming interface events.
+     *
+     * Args:
+     *     None.
+     * Returns:
+     *     String: Original active turn identifiers and native interaction status.
+     */
+    static native String nativeStatus();
 }

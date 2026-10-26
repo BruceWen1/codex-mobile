@@ -12,7 +12,7 @@ import ReactMarkdown from 'react-markdown';
 
 import { CodexClient } from './codex';
 import type { RpcEvent } from './codex';
-import { executeFileOperation, FILE_TOOL } from './files';
+import { FILE_TOOL } from './files';
 import { projectItem, reduceEvent } from './session';
 import type { Message, Workspace } from './types';
 
@@ -64,10 +64,17 @@ export function App() {
   const [login, setLogin] = useState<Record<string, any> | null>(null);
   const [pending, setPending] = useState<RpcEvent[]>([]);
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const state = useRef({ threadId, workspace, model, effort });
+  const [resolving, setResolving] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const initialization = useRef(0);
+  const accountRead = useRef(0);
+  const transition = useRef(false);
+  const resolvingRequest = useRef<string | number | null>(null);
+  const stopRequested = useRef(false);
+  const state = useRef({ threadId, workspace, model, effort, models, busy, turnId });
   const scroll = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
-  state.current = { threadId, workspace, model, effort };
+  state.current = { threadId, workspace, model, effort, models, busy, turnId };
 
   /**
    * Refresh the account and the actual model catalog from Codex.
@@ -78,11 +85,18 @@ export function App() {
    *     Promise<void>: Updated authentication state and model choices.
    */
   async function refreshAccount(): Promise<void> {
+    const readId = ++accountRead.current;
     const response = await client.current.request('account/read', { refreshToken: false });
+    // Apply only the latest account refresh when authentication notifications overlap.
+    if (readId !== accountRead.current) return;
     setAccount(response.account);
+    // Clear the authenticated catalog when the original engine reports a signed-out account.
+    if (!response.account) { setModels([]); setModel(''); return; }
     // Load model choices only from the original engine catalog.
     if (response.account) {
       const catalog = await client.current.request('model/list', {});
+      // Keep a late catalog response from restoring choices after logout.
+      if (readId !== accountRead.current) return;
       setModels(catalog.data ?? []);
       const selected = catalog.data?.find((item: any) => item.model === state.current.model) ?? catalog.data?.find((item: any) => item.isDefault) ?? catalog.data?.[0];
       // Retain a catalog-supported selection or adopt the actual engine default.
@@ -132,12 +146,8 @@ export function App() {
   function receive(event: RpcEvent): void {
     // Preserve pending original server requests for explicit user decisions.
     if (event.id !== undefined) {
-      // Execute read-only file inspections under the selected native directory grant.
-      if (event.method === 'item/tool/call' && event.params.tool === 'mobile_files' && ['list', 'stat', 'read'].includes(event.params.arguments?.operation)) {
-        void executeRead(event);
-        return;
-      }
-      setPending((current) => [...current, event]);
+      // Keep one approval surface for each original request identifier.
+      setPending((current) => current.some((request) => request.id === event.id) ? current : [...current, event]);
       return;
     }
     // Refresh authentication after the upstream login completes.
@@ -152,9 +162,18 @@ export function App() {
     if (event.params.threadId === state.current.threadId) {
       setMessages((current) => reduceEvent(current, event));
       // Track the original turn identifier for interruption.
-      if (event.method === 'turn/started') { setBusy(true); setTurnId(event.params.turn.id); }
+      if (event.method === 'turn/started') {
+        state.current.busy = true; state.current.turnId = event.params.turn.id;
+        setBusy(true); setTurnId(event.params.turn.id);
+      }
       // Complete the visible turn only after the actual engine completion event.
-      if (event.method === 'turn/completed') { setBusy(false); setTurnId(''); void refreshThreads(); }
+      if (event.method === 'turn/completed') {
+        state.current.busy = false; state.current.turnId = '';
+        setBusy(false); setTurnId('');
+        void refreshThreads().catch((error) => setToast(String(error)));
+        // Preserve the engine's terminal failure even when it has no separate error event.
+        if (event.params.turn.status === 'failed' || event.params.turn.error) setToast(event.params.turn.error?.message ?? '任务执行失败。');
+      }
     }
     // Display original execution or native transport failures.
     if (event.method === 'error' || event.method === 'mobile/error') {
@@ -162,26 +181,14 @@ export function App() {
     }
     // Resynchronize authoritative state after a reported event delivery gap.
     if (event.method === 'mobile/lagged' && state.current.threadId) void loadThread(state.current.threadId);
+    // Rejoin the original task selected through an Android notification.
+    if (event.method === 'mobile/resume' && event.params.threadId) void loadThread(event.params.threadId);
     // Clear requests that the original engine has resolved or cancelled.
     if (event.method === 'serverRequest/resolved') setPending((current) => current.filter((request) => request.id !== event.params.requestId));
-  }
-
-  /**
-   * Execute a read-only engine file request within the current native grant.
-   *
-   * Args:
-   *     event (RpcEvent): Actual original dynamic-tool request.
-   * Returns:
-   *     Promise<void>: The actual filesystem result or failure is returned to Codex.
-   */
-  async function executeRead(event: RpcEvent): Promise<void> {
-    try {
-      // Require a current directory and a request for the selected conversation.
-      if (!state.current.workspace || event.params.threadId !== state.current.threadId) throw new Error('The requested mobile workspace is not active.');
-      const result = await executeFileOperation(client.current, state.current.workspace.path, event.params.arguments);
-      await client.current.respond(event.id!, { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] });
-    } catch (error) {
-      await client.current.respond(event.id!, { success: false, contentItems: [{ type: 'inputText', text: String(error) }] });
+    // Reconcile approvals with actual native request ownership after interface suspension.
+    if (event.method === 'mobile/pendingRequests') {
+      const ids = new Set(event.params.requestIds ?? []);
+      setPending((current) => current.some((request) => !ids.has(request.id)) ? current.filter((request) => ids.has(request.id)) : current);
     }
   }
 
@@ -189,19 +196,25 @@ export function App() {
    * Initialize the native Codex host and query its original state.
    *
    * Args:
-   *     None.
+   *     generation (number): Identifier of the current interface attachment.
    * Returns:
    *     Promise<void>: Initialization completes or exposes its actual failure.
    */
-  async function initialize(): Promise<void> {
+  async function initialize(generation: number): Promise<void> {
     try {
       const selected = await client.current.start(receive);
+      // Keep a detached initialization from changing the newly attached interface.
+      if (generation !== initialization.current) return;
       setWorkspace(selected);
       setStatus('ready');
       // Keep an initialized local engine usable when a catalog refresh reports a network error.
       await refreshAccount().catch((error) => setToast(String(error)));
       await refreshThreads().catch((error) => setToast(String(error)));
+      // Restore a process-local task after activity recreation or notification entry.
+      if (generation === initialization.current && client.current.resumeThreadId) await loadThread(client.current.resumeThreadId);
     } catch (error) {
+      // Ignore failures from a startup superseded by effect cleanup or reattachment.
+      if (generation !== initialization.current) return;
       setStatus(Capacitor.isNativePlatform() ? 'failed' : 'preview');
       setStartupError(String(error));
     }
@@ -209,8 +222,9 @@ export function App() {
 
   // Attach the interface to the process-local engine for its visible lifetime.
   useEffect(() => {
-    void initialize();
-    return () => client.current.stop();
+    const generation = ++initialization.current;
+    void initialize(generation);
+    return () => { initialization.current++; client.current.stop(); };
   }, []);
 
   // Keep the visible transcript scrolled to newly received engine content.
@@ -233,13 +247,20 @@ export function App() {
    */
   async function loadThread(id: string): Promise<void> {
     // Preserve the active task's directory and approvals until execution finishes.
-    if (busy && id !== threadId) { setToast('当前任务正在执行，请先停止任务再切换会话。'); return; }
+    if (state.current.busy && id !== state.current.threadId) { setToast('当前任务正在执行，请先停止任务再切换会话。'); return; }
+    // Serialize directory and conversation changes while native requests are pending.
+    if (transition.current) return;
+    transition.current = true; setSwitching(true);
     try {
       const response = await client.current.request('thread/resume', { threadId: id });
       const items = (response.thread.turns ?? []).flatMap((turn: any) => turn.items).map(projectItem).filter(Boolean);
       setThreadId(id);
       state.current.threadId = id;
       setMessages(items);
+      // Restore the engine's saved model and effort before submitting the next turn.
+      if (response.model) { setModel(response.model); state.current.model = response.model; }
+      const restoredEffort = response.reasoningEffort ?? state.current.models.find((item) => item.model === response.model)?.defaultReasoningEffort ?? state.current.effort;
+      setEffort(restoredEffort); state.current.effort = restoredEffort;
       const cwd = response.thread.cwd;
       // Restore the original working directory before continuing a saved thread.
       if (cwd) {
@@ -248,10 +269,15 @@ export function App() {
         state.current.workspace = selected;
       }
       const lastTurn = response.thread.turns?.at(-1);
-      setBusy(lastTurn?.status === 'inProgress');
-      setTurnId(lastTurn?.status === 'inProgress' ? lastTurn.id : '');
+      // Prefer actual loaded-thread activity over an unfinished historical turn after restart.
+      const running = response.thread.status?.type ? response.thread.status.type === 'active' : lastTurn?.status === 'inProgress';
+      setBusy(running);
+      setTurnId(running && lastTurn ? lastTurn.id : '');
+      state.current.busy = running;
+      state.current.turnId = running && lastTurn ? lastTurn.id : '';
       setDrawer(false);
     } catch (error) { setToast(String(error)); }
+    finally { transition.current = false; setSwitching(false); }
   }
 
   /**
@@ -268,9 +294,13 @@ export function App() {
     // Present the existing authentication choices before an unauthenticated request.
     if (!account) { setSettings(true); return; }
     // Submit only a nonempty task while the selected conversation is idle.
-    if (!draft.trim() || busy || !workspace) return;
+    if (!draft.trim() || state.current.busy || transition.current || !workspace) return;
     const text = draft.trim();
+    const localId = 'local-' + crypto.randomUUID();
+    state.current.busy = true; state.current.turnId = '';
+    stopRequested.current = false;
     setBusy(true);
+    setTurnId('');
     setDraft('');
     try {
       let id = threadId;
@@ -291,15 +321,30 @@ export function App() {
         setThreadId(id);
         state.current.threadId = id;
       }
-      setMessages((current) => [...current, { id: 'local-' + crypto.randomUUID(), role: 'user', text }]);
+      // Honor a stop requested while the native engine was creating the conversation.
+      if (stopRequested.current) {
+        state.current.busy = false; setBusy(false); setDraft(text);
+        return;
+      }
+      setMessages((current) => [...current, { id: localId, role: 'user', text }]);
       const response = await client.current.request('turn/start', {
         threadId: id,
         input: [{ type: 'text', text, text_elements: [] }],
         model: model || null,
         effort,
       });
-      setTurnId(response.turn.id);
-    } catch (error) { setToast(String(error)); setBusy(false); setDraft(text); }
+      // Preserve a terminal event that arrived before the turn-start response.
+      if (state.current.busy) {
+        state.current.turnId = response.turn.id; setTurnId(response.turn.id);
+        // Deliver an interruption requested before the original turn identifier was known.
+        if (stopRequested.current) await interrupt();
+      }
+    } catch (error) {
+      state.current.busy = false; state.current.turnId = '';
+      setToast(String(error)); setBusy(false); setTurnId(''); setDraft(text);
+      // Remove only this failed optimistic submission while preserving authoritative items.
+      setMessages((current) => current.filter((message) => message.id !== localId));
+    }
   }
 
   /**
@@ -311,8 +356,13 @@ export function App() {
    *     Promise<void>: The original interrupt request is delivered to the engine.
    */
   async function interrupt(): Promise<void> {
+    stopRequested.current = true;
     // Send interruption only for an actual running turn.
-    if (threadId && turnId) await client.current.request('turn/interrupt', { threadId, turnId });
+    if (state.current.threadId && state.current.turnId) {
+      try {
+        await client.current.request('turn/interrupt', { threadId: state.current.threadId, turnId: state.current.turnId });
+      } catch (error) { setToast(String(error)); }
+    }
   }
 
   /**
@@ -325,7 +375,7 @@ export function App() {
    */
   function newConversation(): void {
     // Keep a running turn visible until it is completed or interrupted.
-    if (busy) { setToast('当前任务正在执行，请先停止任务。'); return; }
+    if (state.current.busy || transition.current) { setToast('当前任务正在执行或切换，请稍后再创建会话。'); return; }
     setThreadId(''); state.current.threadId = ''; setMessages([]); setDrawer(false); setDraft('');
   }
 
@@ -340,10 +390,16 @@ export function App() {
   async function selectDirectory(): Promise<void> {
     // Require the actual native permission interface for device directories.
     if (status !== 'ready') { setToast(startupError); return; }
+    // Hold the current conversation while the platform directory picker is active.
+    if (state.current.busy || transition.current) return;
+    transition.current = true; setSwitching(true);
     try {
       const selected = await client.current.selectDirectory();
-      setWorkspace(selected); setWorkspaceMenu(false); newConversation();
+      setWorkspace(selected); state.current.workspace = selected;
+      setThreadId(''); state.current.threadId = ''; setMessages([]); setDraft('');
+      setWorkspaceMenu(false); setDrawer(false);
     } catch (error) { setToast(String(error)); }
+    finally { transition.current = false; setSwitching(false); }
   }
 
   /**
@@ -380,19 +436,13 @@ export function App() {
   async function resolveRequest(allow: boolean): Promise<void> {
     const event = pending[0];
     // Keep an absent request from generating a protocol response.
-    if (!event || event.id === undefined) return;
+    if (!event || event.id === undefined || resolvingRequest.current !== null) return;
+    resolvingRequest.current = event.id; setResolving(true);
     try {
       // Route mobile file operations through the original filesystem surface.
       if (event.method === 'item/tool/call' && event.params.tool === 'mobile_files') {
-        let result;
-        // Execute only the operation that the user has accepted for this request.
-        if (allow && state.current.workspace && event.params.threadId === state.current.threadId) {
-          try {
-            const output = await executeFileOperation(client.current, state.current.workspace.path, event.params.arguments);
-            result = { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(output) }] };
-          } catch (error) { result = { success: false, contentItems: [{ type: 'inputText', text: String(error) }] }; }
-        } else { result = { success: false, contentItems: [{ type: 'inputText', text: 'The user declined this operation.' }] }; }
-        await client.current.respond(event.id, result);
+        // Bind execution to the original native request and its authoritative thread directory.
+        await client.current.resolveFile(event.id, allow);
       } else if (event.method.includes('requestUserInput')) {
         const result = Object.fromEntries((event.params.questions ?? []).map((question: any) => [question.id, { answers: [answers[question.id] ?? ''] }]));
         await client.current.respond(event.id, { answers: allow ? result : {} });
@@ -401,8 +451,10 @@ export function App() {
       } else if (event.method.includes('requestApproval')) {
         await client.current.respond(event.id, { decision: allow ? 'accept' : 'decline' });
       } else { await client.current.reject(event.id, 'This mobile interface does not handle the requested interaction.'); }
-      setPending((current) => current.slice(1)); setAnswers({});
+      // Resolve this identifier even when a server cancellation has already removed it.
+      setPending((current) => current.filter((request) => request.id !== event.id)); setAnswers({});
     } catch (error) { setToast(String(error)); }
+    finally { resolvingRequest.current = null; setResolving(false); }
   }
 
   const activeRequest = pending[0];
@@ -448,7 +500,7 @@ export function App() {
         <div className="composer-bottom"><div className="composer-context">
           <button className="workspace-chip" onClick={() => setWorkspaceMenu(true)}><Folder size={14} /><span>{workspace?.name ?? '选择目录'}</span><ChevronDown size={12} /></button>
           <button className="model-chip" onClick={() => setModelMenu(true)}><span>{modelLabel}</span><ChevronDown size={12} /></button>
-        </div><button className="send-button" aria-label={busy ? '停止任务' : '发送任务'} disabled={!busy && !draft.trim()} onClick={() => void (busy ? interrupt() : send())}>{busy ? <Square size={16} fill="currentColor" /> : <ArrowUp size={20} />}</button></div>
+        </div><button className="send-button" aria-label={busy ? '停止任务' : '发送任务'} disabled={switching || (!busy && !draft.trim())} onClick={() => void (busy ? interrupt() : send())}>{busy ? <Square size={16} fill="currentColor" /> : <ArrowUp size={20} />}</button></div>
       </div>
       <div className="footer-meta"><span><span className={`status-dot ${status}`} />{statusLabel}</span><button onClick={() => setSettings(true)}><Settings2 size={12} />{account ? '设置' : '登录 Codex'}</button></div>
     </footer>
@@ -485,12 +537,12 @@ export function App() {
       {workspaceMenu && !activeRequest && <><div className="sheet-heading"><h2>工作目录</h2><button className="icon-button" aria-label="关闭目录选择" onClick={() => setWorkspaceMenu(false)}><X size={18} /></button></div>
         <p className="sheet-description">Codex 会在选定目录中读取和处理文件。</p>
         <div className="current-workspace"><FolderOpen size={22} /><div><strong>{workspace?.name ?? '尚未选择目录'}</strong><span>{workspace ? '当前工作目录' : '通过系统授权选择手机文件夹'}</span></div></div>
-        <button className="primary-button" disabled={busy} onClick={() => void selectDirectory()}><Folder size={17} />选择手机文件夹</button>
+        <button className="primary-button" disabled={busy || switching} onClick={() => void selectDirectory()}><Folder size={17} />选择手机文件夹</button>
       </>}
       {activeRequest && <><div className="sheet-heading"><h2>{activeRequest.method.includes('requestUserInput') ? 'Codex 需要你的选择' : '允许执行此操作？'}</h2><ShieldCheck size={22} /></div>
         <p className="sheet-description">{activeRequest.params.reason ?? activeRequest.params.command ?? activeRequest.params.tool ?? '确认当前任务中的操作。'}</p>
         {activeRequest.method.includes('requestUserInput') ? (activeRequest.params.questions ?? []).map((question: any) => <div className="question" key={question.id}><label>{question.question}</label>{question.options?.map((option: any) => <button className={answers[question.id] === option.label ? 'selected' : ''} key={option.label} onClick={() => setAnswers((current) => ({ ...current, [question.id]: option.label }))}>{option.label}</button>)}<input placeholder="输入你的回答" value={answers[question.id] ?? ''} onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))} /></div>) : <pre className="approval-detail">{JSON.stringify(activeRequest.params.arguments ?? activeRequest.params.permissions ?? activeRequest.params.commandActions ?? activeRequest.params, null, 2)}</pre>}
-        <div className="approval-buttons"><button className="secondary-button" onClick={() => void resolveRequest(false)}>拒绝</button><button className="primary-button" onClick={() => void resolveRequest(true)}>{activeRequest.method.includes('requestUserInput') ? '提交选择' : '允许此次操作'}</button></div>
+        <div className="approval-buttons"><button className="secondary-button" disabled={resolving} onClick={() => void resolveRequest(false)}>拒绝</button><button className="primary-button" disabled={resolving} onClick={() => void resolveRequest(true)}>{activeRequest.method.includes('requestUserInput') ? '提交选择' : '允许此次操作'}</button></div>
       </>}
     </section></div>}
   </div>;

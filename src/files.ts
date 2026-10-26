@@ -62,10 +62,10 @@ export async function executeFileOperation(client: CodexClient, root: string, ar
   const path = resolveMobilePath(root, args.path);
   // Dispatch each supported operation to the corresponding original protocol method.
   switch (args.operation) {
-    case 'list': return client.request('fs/readDirectory', { path });
-    case 'stat': return client.request('fs/getMetadata', { path });
+    case 'list': return client.request('fs/readDirectory', { path }, root);
+    case 'stat': return client.request('fs/getMetadata', { path }, root);
     case 'read': {
-      const result = await client.request<{ dataBase64: string }>('fs/readFile', { path });
+      const result = await client.request<{ dataBase64: string }>('fs/readFile', { path }, root);
       // Return binary data as base64 when the model explicitly requests that encoding.
       if (args.encoding === 'base64') return result;
       const bytes = Uint8Array.from(atob(result.dataBase64), (character) => character.charCodeAt(0));
@@ -74,9 +74,9 @@ export async function executeFileOperation(client: CodexClient, root: string, ar
     case 'write': {
       const bytes = new TextEncoder().encode(args.content ?? '');
       const dataBase64 = args.encoding === 'base64' ? args.content : btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''));
-      return client.request('fs/writeFile', { path, dataBase64 });
+      return client.request('fs/writeFile', { path, dataBase64 }, root);
     }
-    case 'mkdir': return client.request('fs/createDirectory', { path, recursive: true });
+    case 'mkdir': return client.request('fs/createDirectory', { path, recursive: true }, root);
     case 'copy':
     case 'move': {
       const destinationPath = resolveMobilePath(root, args.destination);
@@ -85,15 +85,15 @@ export async function executeFileOperation(client: CodexClient, root: string, ar
         throw new Error('请选择具体文件或子目录，并指定独立的目标路径。');
       }
       // Copy through the original engine before removing the source for a move.
-      const result = await client.request('fs/copy', { sourcePath: path, destinationPath, recursive: true });
+      const result = await client.request('fs/copy', { sourcePath: path, destinationPath, recursive: true }, root);
       // Remove the source only after a successful copy response.
-      if (args.operation === 'move') await client.request('fs/remove', { path, recursive: true, force: false });
+      if (args.operation === 'move') await client.request('fs/remove', { path, recursive: true, force: false }, root);
       return result;
     }
     case 'delete':
       // Preserve the selected root while allowing operations on its contents.
       if (path === root.replace(/\/$/, '')) throw new Error('请选择当前目录中的具体文件或子目录。');
-      return client.request('fs/remove', { path, recursive: true, force: false });
+      return client.request('fs/remove', { path, recursive: true, force: false }, root);
     default: throw new Error('当前系统操作无法识别。');
   }
 }

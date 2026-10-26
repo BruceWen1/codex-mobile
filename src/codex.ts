@@ -24,7 +24,7 @@ export interface RpcEvent {
  * The native host embeds Rust in the same mobile application process.
  */
 interface NativeHost {
-  start(): Promise<{ result?: { workspace: string; shellAvailable: boolean }; error?: { message: string } }>;
+  start(): Promise<{ result?: { workspace: string; shellAvailable: boolean; bridgeApiVersion: number; activeThreadId?: string; resumeThreadId?: string }; error?: { message: string } }>;
   request(options: { json: string }): Promise<{ result?: any; error?: { message: string } }>;
   poll(): Promise<{ events: RpcEvent[] }>;
   selectDirectory(): Promise<Workspace>;
@@ -39,9 +39,12 @@ const host = registerPlugin<NativeHost>('CodexRuntime');
  */
 export class CodexClient {
   shellAvailable = false;
+  resumeThreadId = '';
   private nextId = 1;
   private polling = false;
   private stopped = true;
+  private startupId = 0;
+  private pollTimer?: ReturnType<typeof setTimeout>;
   private listener?: (event: RpcEvent) => void;
 
   /**
@@ -57,11 +60,19 @@ export class CodexClient {
     if (!Capacitor.isNativePlatform()) {
       throw new Error('当前为界面预览。系统操作需要安装包含 Codex 内核的手机应用。');
     }
+    const startupId = ++this.startupId;
+    this.stopped = true;
+    clearTimeout(this.pollTimer);
     this.listener = listener;
     const response = await host.start();
+    // Ignore a native startup superseded by detachment or a newer attachment.
+    if (startupId !== this.startupId) throw new DOMException('Codex client startup was detached.', 'AbortError');
     // Surface native startup errors before enabling task submission.
     if (response.error) throw new Error(response.error.message);
+    // Require the native tool and task lifecycle contract packaged with this interface.
+    if (response.result?.bridgeApiVersion !== 2) throw new Error('手机界面与原生内核版本不匹配，请重新构建并安装完整应用。');
     this.shellAvailable = response.result!.shellAvailable;
+    this.resumeThreadId = response.result!.resumeThreadId || response.result!.activeThreadId || '';
     this.stopped = false;
     void this.poll();
     return { id: 'private', name: '应用文件夹', kind: 'private', path: response.result!.workspace };
@@ -73,11 +84,13 @@ export class CodexClient {
    * Args:
    *     method (string): Original protocol method name.
    *     params (object): Original protocol request parameters.
+   *     workspaceRoot (string | undefined): Native directory boundary for a filesystem request.
    * Returns:
    *     Promise<T>: Result produced by the embedded Codex engine.
    */
-  async request<T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    const response = await host.request({ json: JSON.stringify({ id: this.nextId++, method, params }) });
+  async request<T = any>(method: string, params: Record<string, unknown> = {}, workspaceRoot?: string): Promise<T> {
+    // The native host consumes the directory boundary before upstream protocol dispatch.
+    const response = await host.request({ json: JSON.stringify({ id: this.nextId++, method, params, mobileWorkspaceRoot: workspaceRoot }) });
     // Propagate engine errors while preserving the original successful response.
     if (response.error) throw new Error(response.error.message);
     return response.result as T;
@@ -108,7 +121,24 @@ export class CodexClient {
    *     Promise<void>: Completion of error delivery to the engine.
    */
   async reject(id: string | number, message: string): Promise<void> {
-    await host.request({ json: JSON.stringify({ id, error: { code: -32601, message } }) });
+    const response = await host.request({ json: JSON.stringify({ id, error: { code: -32601, message } }) });
+    // Keep a failed rejection visible so the request can be retried.
+    if (response.error) throw new Error(response.error.message);
+  }
+
+  /**
+   * Resolve an original mobile file request through the native executor.
+   *
+   * Args:
+   *     id (string | number): Original pending tool request identifier.
+   *     allow (boolean): User decision for this specific original request.
+   * Returns:
+   *     Promise<void>: Native execution and original tool-response delivery complete.
+   */
+  async resolveFile(id: string | number, allow: boolean): Promise<void> {
+    const response = await host.request({ json: JSON.stringify({ id, mobileFileDecision: allow }) });
+    // Preserve a failed native response for an explicit retry by the interface.
+    if (response.error) throw new Error(response.error.message);
   }
 
   /**
@@ -139,7 +169,12 @@ export class CodexClient {
    * Returns:
    *     void: Event polling stops while the native engine retains its state.
    */
-  stop(): void { this.stopped = true; this.listener = undefined; }
+  stop(): void {
+    this.startupId++;
+    this.stopped = true;
+    this.listener = undefined;
+    clearTimeout(this.pollTimer);
+  }
 
   /**
    * Poll native events without overlapping bridge requests.
@@ -163,7 +198,7 @@ export class CodexClient {
     } finally {
       this.polling = false;
       // Continue event delivery while the interface owns this client.
-      if (!this.stopped) setTimeout(() => void this.poll(), 100);
+      if (!this.stopped) this.pollTimer = setTimeout(() => void this.poll(), 100);
     }
   }
 }

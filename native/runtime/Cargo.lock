@@ -2996,6 +2996,7 @@ name = "codex-mobile-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "codex-app-server",
  "codex-app-server-protocol",
  "codex-arg0",

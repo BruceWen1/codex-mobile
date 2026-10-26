@@ -5,7 +5,7 @@
  * =====================
  * Builds the shared interface and packages the embedded upstream Codex runtime.
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -59,6 +59,8 @@ function buildEnvironment() {
   if (!existsSync(env.ANDROID_HOME)) throw new Error('Set ANDROID_SDK_ROOT to an installed Android SDK.');
   const cacheRoot = resolve(process.platform === 'win32' ? env.LOCALAPPDATA ?? homedir() : resolve(homedir(), '.cache'), 'codex-mobile-build');
   env.GRADLE_USER_HOME = env.GRADLE_USER_HOME ?? resolve(cacheRoot, 'gradle');
+  // Keep replaceable native build outputs in the local cache used by this coordinator.
+  env.CODEX_MOBILE_ANDROID_BUILD_DIR = env.CODEX_MOBILE_ANDROID_BUILD_DIR ?? resolve(cacheRoot, 'android-output');
   const proxyValue = env.HTTPS_PROXY ?? env.HTTP_PROXY;
   // Honor the existing development proxy when it uses an HTTP transport.
   if (proxyValue) {
@@ -96,6 +98,10 @@ function main() {
   // Run the Gradle wrapper directly through Java for portable Windows argument handling.
   const java = resolve(env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
   run(java, ['-classpath', resolve(root, 'android/gradle/wrapper/gradle-wrapper.jar'), 'org.gradle.wrapper.GradleWrapperMain', '-p', 'android', '--project-cache-dir', resolve(cacheRoot, 'android-project'), ':app:assembleDebug', '--console=plain', '--no-daemon'], env);
+  const packagePath = resolve(root, 'android/app/build/outputs/apk/debug');
+  // Publish only the completed APK back into the maintained project artifact location.
+  mkdirSync(packagePath, { recursive: true });
+  copyFileSync(resolve(env.CODEX_MOBILE_ANDROID_BUILD_DIR, 'app/outputs/apk/debug/app-debug.apk'), resolve(packagePath, 'app-debug.apk'));
   process.stdout.write(JSON.stringify({ apk: 'android/app/build/outputs/apk/debug/app-debug.apk', totalMs: Math.round(performance.now() - started), stages: timings }, null, 2) + '\n');
 }
 

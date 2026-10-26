@@ -7,6 +7,7 @@
  */
 package dev.codex.mobile;
 
+import android.content.Intent;
 import android.os.Bundle;
 
 import com.getcapacitor.BridgeActivity;
@@ -29,5 +30,20 @@ public class MainActivity extends BridgeActivity {
         // Register the native engine before initializing the web container.
         registerPlugin(CodexRuntimePlugin.class);
         super.onCreate(savedInstanceState);
+    }
+
+    /**
+     * Retain notification navigation for the existing activity and future recreation.
+     *
+     * Args:
+     *     intent (Intent): Original Android task navigation intent.
+     * Returns:
+     *     void: The bridge receives the intent and the activity retains its task identifier.
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        // Preserve the task selected by Android before forwarding native navigation.
+        setIntent(intent);
+        super.onNewIntent(intent);
     }
 }

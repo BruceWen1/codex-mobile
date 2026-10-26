@@ -21,11 +21,15 @@ The source checkout pins Codex to commit `a9abdeaff1773ec6e867253ae59b1912807767
 
 The native host creates a private Codex state directory and starts the upstream in-process app-server. Requests and events retain the original protocol names and payloads. ChatGPT login uses the original device-code authorization flow. API Key login uses `account/login/start` with the original `apiKey` authentication type. The upstream engine owns token refresh, account state, conversations, and model requests.
 
-Android packages an ARM64 Rust runtime and an upstream execution helper. The helper is installed in the application's native code directory and supplies the original subprocess helper modes. Command execution runs with the application's operating-system permissions. Shared-storage access is granted through Android's file-access permission interface.
+Android packages an ARM64 Rust runtime and an upstream execution helper. The helper is installed in the application's native code directory and supplies the original subprocess helper modes. Command execution runs with the application's operating-system permissions. The selected directory supplies the default working location; shell access follows the operating-system grants. Shared-storage access is granted through Android's file-access permission interface.
+
+Android retains user-initiated turns through a foreground service. Its notification rejoins the original conversation and offers interruption of active native turns. A bounded, renewable CPU wake lock supports execution while the screen is locked and is released during user-input waits and after completion. Native task status controls service lifetime. Operating-system process termination ends in-flight execution; saved conversations remain available for explicit continuation.
 
 iOS uses a static Rust framework inside the application process. Selected directories retain their operating-system security scopes through native bookmarks. The iOS adapter provides filesystem operations inside those grants. Native subprocess execution requires platform support and remains outside the iOS execution adapter's current capabilities.
 
-The filesystem adapter maps listing, metadata inspection, reading, writing, directory creation, copying, moving, and deletion to the original `fs/*` protocol methods. A move performs a successful copy before removing its source. File paths are relative to the selected working directory. Read-only requests execute under the directory grant; mutating requests present a confirmation surface.
+The native filesystem adapter maps listing, metadata inspection, reading, writing, directory creation, copying, moving, and deletion to the original `fs/*` protocol methods. The original thread API supplies each tool's working directory, including requests from child agents. Read-only requests execute in the native host; mutating requests present a confirmation surface and retain their original arguments and identifiers. A move performs a successful copy before removing its source. Existing copy and overwrite semantics follow the original filesystem implementation.
+
+File-tool paths are relative to the original thread directory. Native validation checks resolved targets and mapped recursive-copy destinations, while link copying and removal operate on the link entries. Pending interactions survive interface recreation. Bounded native event delivery retains interactive requests and reports notification gaps for authoritative history recovery. The packaged interface verifies its native bridge version before enabling submission.
 
 The browser preview renders the interface and identifies itself as an interface preview. Device operations use the packaged native application.
 
@@ -37,7 +41,7 @@ The browser preview renders the interface and identifies itself as an interface 
 - Android cross-compilation on Windows: Unix-compatible Perl with its standard modules, GNU make, and an Android NDK compiler. Git for Windows supplies a lightweight Unix Perl interpreter; the build coordinator can supplement its modules from project-local build tools.
 - iOS: macOS, Xcode, and the ARM64 device and simulator Rust targets. Device installation uses the developer's signing configuration.
 
-Tool locations are discovered from environment variables or the project-local `.tools/` directory. Gradle caches use a dynamically resolved system-local cache directory so native builds can run from synchronized source directories.
+Tool locations are discovered from environment variables or the project-local `.tools/` directory. Gradle caches and replaceable application build outputs use a dynamically resolved system-local cache directory. The coordinator copies the completed APK into the project artifact location after successful packaging. `CODEX_MOBILE_ANDROID_BUILD_DIR` selects an explicit build-output cache when needed.
 
 ## Setup and interface preview
 
@@ -101,6 +105,6 @@ Real-account authorization, model inference, background behavior, and operating-
 
 The Android ARM64 prototype is available at `artifacts/android/codex-mobile-0.1.0-arm64.apk`. Its build metadata and integrity hash are recorded in `artifacts/android/build-report.json`.
 
-The current build has passed native Android cross-compilation, Android Java compilation, APK packaging and signature verification, 11 frontend unit checks, four mobile-interface checks, and the original-core integration fixture. The native libraries use 16 KiB ELF segment alignment. Device authorization and runtime behavior remain subject to device verification.
+The current build has passed native Android cross-compilation, Android Java compilation, APK packaging and signature verification, 17 frontend unit checks, 11 mobile-interface and bridge checks, and seven native runtime checks including the original-core integration fixture. The packaged native library hashes match the current compiled binaries. The native libraries use 16 KiB ELF segment alignment. Device authorization, notification handling, lock-screen execution, and operating-system grants remain subject to device verification.
 
 The prototype uses the `dev-mobile` build profile and includes both the original agent runtime and its execution helper. Its APK size is approximately 157 MiB. The maintained `release` profile provides optimized native builds.

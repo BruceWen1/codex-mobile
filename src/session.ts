@@ -58,6 +58,8 @@ export function reduceEvent(messages: Message[], event: RpcEvent): Message[] {
     // Preserve the transcript for item types without a display representation.
     if (!item) return messages;
     const index = messages.findIndex((message) => message.id === item.id);
+    // Retain streamed text when an empty start item arrives after its first delta.
+    if (method === 'item/started' && index !== -1 && item.role === 'assistant' && !item.text) return messages;
     // Replace the optimistic user item with the actual server item.
     if (item.role === 'user' && index === -1) {
       const optimistic = messages.findIndex((message) => message.id.startsWith('local-') && message.text === item.text);

@@ -13,6 +13,7 @@ path = "src/exec_host.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 codex-app-server = { path = "../../upstream/codex/codex-rs/app-server" }
 codex-app-server-protocol = { path = "../../upstream/codex/codex-rs/app-server-protocol" }
 codex-arg0 = { path = "../../upstream/codex/codex-rs/arg0" }

@@ -16,6 +16,14 @@ buildscript {
 
 apply from: "variables.gradle"
 
+// Resolve replaceable build outputs from the coordinator's dynamically selected local cache.
+def nativeBuildOutput = System.getenv('CODEX_MOBILE_ANDROID_BUILD_DIR')
+if (nativeBuildOutput) {
+    allprojects { project ->
+        project.layout.buildDirectory.set(new File(nativeBuildOutput, project.name))
+    }
+}
+
 allprojects {
     repositories {
         google()

@@ -1,9 +1,9 @@
-﻿{
+{
     "version":  "0.1.0",
     "package":  "dev.codex.mobile",
     "artifact":  "codex-mobile-0.1.0-arm64.apk",
-    "bytes":  165086177,
-    "sha256":  "a1b928e2d160d0e35d43aec36e624765ed9c0471a9d9c1820d7bd9ac1e6234b8",
+    "bytes":  165169609,
+    "sha256":  "c7fe00abde4c2a4177a3a13fbeb736c04d9de63eb0caa27cb9a3103f690d6e03",
     "minAndroidApi":  26,
     "targetAndroidApi":  36,
     "architecture":  "arm64-v8a",
@@ -14,10 +14,14 @@
                        "apkSignature":  "passed",
                        "elfArchitecture":  "AArch64",
                        "elfPageAlignment":  "16 KiB",
-                       "frontendUnitTests":  11,
-                       "mobileInterfaceTests":  4,
+                       "frontendUnitTests":  17,
+                       "mobileInterfaceTests":  11,
                        "originalCoreIntegrationTests":  1,
-                       "deviceValidation":  "pending - no device attached",
-                       "iosBinary":  "pending - macOS/Xcode required"
-                   }
+                       "deviceValidation":  "pending - device validation not run",
+                       "iosBinary":  "pending - macOS/Xcode required",
+                       "nativeRuntimeTests":  7,
+                       "androidBackgroundService":  "implemented and compiled; device lifecycle validation pending"
+                   },
+    "nativeBridgeApiVersion":  2,
+    "builtAtUtc":  "2026-10-10T11:18:47.6446301Z"
 }

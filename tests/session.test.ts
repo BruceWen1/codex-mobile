@@ -11,6 +11,12 @@ import { projectItem, reduceEvent } from '../src/session';
 
 // Engine deltas can arrive before their authoritative completed item.
 describe('original Codex event projection', () => {
+  it('retains a delta received before an empty item-started event', () => {
+    const streamed = reduceEvent([], { method: 'item/agentMessage/delta', params: { itemId: 'item-1', delta: 'First delta' } });
+    const started = reduceEvent(streamed, { method: 'item/started', params: { item: { id: 'item-1', type: 'agentMessage', text: '' } } });
+    expect(started[0].text).toBe('First delta');
+  });
+
   it('reconciles streamed text with the authoritative completed item', () => {
     let transcript = reduceEvent([], { method: 'item/agentMessage/delta', params: { itemId: 'item-1', delta: 'Hello' } });
     transcript = reduceEvent(transcript, { method: 'item/agentMessage/delta', params: { itemId: 'item-1', delta: ', Codex' } });
